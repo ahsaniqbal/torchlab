@@ -9,9 +9,13 @@ __global__ void cmatmul_forward_kernel(const scalar_t* __restrict__ inputA,
 
 }
 
-at::Tensor torchlab::ops::matmul::adjustTensor(const at::Tensor& t, int targetDim) {
+at::Tensor torchlab::ops::matmul::unsqueezeToDim(const at::Tensor& t, int targetDim) {
     TORCH_CHECK(t.dim() <= targetDim,
     "expected input tensor to have at most ", targetDim, " dims, got ", t.dim());
+
+    if (t.dim() == targetDim) {
+        return t;
+    }
 
     auto out = t;
     auto thisDim = t.dim();
@@ -21,16 +25,7 @@ at::Tensor torchlab::ops::matmul::adjustTensor(const at::Tensor& t, int targetDi
     return out;
 }
 
-void torchlab::ops::matmul::copyStridesToDevice(const at::Tensor& t, int64_t*& strides_d,
-                                                cudaStream_t stream) {
-    auto numBytes = t.dim() * sizeof(int64_t);
-    auto err1 = cudaMallocAsync(&strides_d, numBytes, stream);
-    TORCH_CHECK(err1 == cudaSuccess, "cudaMallocAsync failed: ", cudaGetErrorString(err1));
-    auto err2 = cudaMemcpyAsync(strides_d, t.strides().data(), numBytes, cudaMemcpyHostToDevice, stream);
-    TORCH_CHECK(err2 == cudaSuccess, "cudaMemcpyAsync failed: ", cudaGetErrorString(err2));
-}
-
-at::Tensor torchlab::ops::matmul::forward(const at::Tensor& inputA, const at::Tensor& inputB) {
+void torchlab::ops::matmul::validateOpInput(const at::Tensor& inputA, const at::Tensor& inputB) {
     TORCH_CHECK(inputA.is_cuda(), "cmatmul::forward inputA must be a CUDA Tensor.");
     TORCH_CHECK(inputB.is_cuda(), "cmatmul::forward inputB must be a CUDA Tensor.");
     TORCH_CHECK(inputA.device() == inputB.device(),
@@ -55,34 +50,47 @@ at::Tensor torchlab::ops::matmul::forward(const at::Tensor& inputA, const at::Te
 
     TORCH_CHECK(shapeA.size() >= 2 && shapeB.size() >= 2 && shapeA[shapeA.size() - 1] == shapeB[shapeB.size() - 2],
                     "cmatmul::forward both inputs should be compatible for matrix multiplication.");
+}
+
+std::vector<int64_t> torchlab::ops::matmul::getOutputShape(const at::Tensor& matA, const at::Tensor& matB) {
+    TORCH_CHECK(matA.dim() == matB.dim(),
+                "cmatmul::forward tensors must have same number of dims after alignment, got ",
+                matA.dim(), " vs ", matB.dim());
+
+    auto matAShape = matA.sizes();
+    auto matBShape = matB.sizes();
+
+    auto outputShape = std::vector<int64_t>(matA.dim(), 1);
+    outputShape[outputShape.size() - 1] = matBShape[matBShape.size() - 1];
+    outputShape[outputShape.size() - 2] = matAShape[matAShape.size() - 2];
+
+    for (int i = 0; i < outputShape.size() - 2; i++) {
+        auto dimA = matAShape[i];
+        auto dimB = matBShape[i];
+        TORCH_CHECK(dimA == dimB || dimA == 1 || dimB == 1,
+                    "cmatmul::forward the input tensors can't be broadcastable");
+        outputShape[i] = std::max(dimA, dimB);
+    }
+    return outputShape;
+}
+
+at::Tensor torchlab::ops::matmul::forward(const at::Tensor& inputA, const at::Tensor& inputB) {
+    validateOpInput(inputA, inputB);
     
     c10::cuda::CUDAGuard guard(inputA.device());
     auto stream = at::cuda::getCurrentCUDAStream();
 
     auto targetDim = std::max(inputA.dim(), inputB.dim());
-    auto matA = adjustTensor(inputA, targetDim);
-    auto matB = adjustTensor(inputB, targetDim);
+    auto matA = unsqueezeToDim(inputA, targetDim);
+    auto matB = unsqueezeToDim(inputB, targetDim);
 
-    auto outputShape = std::vector<int64_t>(matA.dim(), 1);
-    outputShape[outputShape.size() - 1] = matB.sizes()[matB.dim() - 1];
-    outputShape[outputShape.size() - 2] = matA.sizes()[matA.dim() - 2];
-
-    for (int i = 0; i < outputShape.size() - 2; i++) {
-        auto dimA = matA.sizes()[i];
-        auto dimB = matB.sizes()[i];
-        TORCH_CHECK(dimA == dimB || dimA == 1 || dimB == 1,
-                    "cmatmul::forward the input tensors can't be broadcastable");
-        outputShape[i] = std::max(dimA, dimB);
-    }
+    auto outputShape = getOutputShape(matA, matB);
 
     auto output = at::empty(outputShape, matA.options());
 
-    int64_t *stridesA = nullptr;
-    int64_t *stridesB = nullptr;
-    int64_t *stridesOut = nullptr;
-    copyStridesToDevice(matA, stridesA, stream);
-    copyStridesToDevice(matB, stridesB, stream);
-    copyStridesToDevice(output, stridesOut, stream);
+    auto stridesA = at::tensor(matA.strides(), matA.options().dtype(at::kLong));
+    auto stridesB = at::tensor(matB.strides(), matB.options().dtype(at::kLong));
+    auto stridesOut = at::tensor(output.strides(), output.options().dtype(at::kLong));
 
     int numThreadsRows = 32;
     int numThreadsCols = 32;
@@ -100,14 +108,11 @@ at::Tensor torchlab::ops::matmul::forward(const at::Tensor& inputA, const at::Te
                                 batchCount);
         dim3 blockConfig = dim3(numThreadsRows, numThreadsCols, 1);
         
-        cmatmul_forward_kernel<scalar_t><<<gridConfig, blockConfig, 0, stream>>>(dataMatA, dataMatB, dataOut,
-            matA.sizes()[matA.dim() - 2], matA.sizes()[matA.dim() - 1], matB.sizes()[matB.dim() - 1], batchCount, stridesOut, stridesA, stridesB, output.dim());
+        //kernel_launch_here
+        //cmatmul_forward_kernel<scalar_t><<<gridConfig, blockConfig, 0, stream>>>(dataMatA, dataMatB, dataOut,
+        //    matA.sizes()[matA.dim() - 2], matA.sizes()[matA.dim() - 1], matB.sizes()[matB.dim() - 1], batchCount, stridesOut, stridesA, stridesB, output.dim());
 
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     });
-
-    cudaFreeAsync(stridesA, stream);
-    cudaFreeAsync(stridesB, stream);
-    cudaFreeAsync(stridesOut, stream);
     return output;
 }
