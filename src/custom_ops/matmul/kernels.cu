@@ -2,11 +2,55 @@
 #include <numeric>
 #include "ops.hpp"
 
+__device__ int getBatchOffset(const int* __restrict__ stridesOut,
+                              const int* __restrict__ stridesIn, 
+                              const int* __restrict__ shapeIn,
+                              int linearIndexOut, int rank) {
+    int batchOffset = 0;
+    int dimIndex = 0;
+    for (int i = 0; i < (rank - 2); i++) {
+        dimIndex = linearIndexOut / stridesOut[i];
+        linearIndexOut %= stridesOut[i];
+        batchOffset += (shapeIn[i] == 1 ? 0 : dimIndex) * stridesIn[i];
+    }
+    return batchOffset;
+}
+
+
+
+
 template<typename scalar_t>
 __global__ void cmatmul_forward_kernel(const scalar_t* __restrict__ inputA,
     const scalar_t* __restrict__ inputB, scalar_t* __restrict__ output,
-    int64_t rowsA, int64_t colsA, int64_t colsB) {
+    const int* __restrict__ stridesA, const int* __restrict__ stridesB,
+    const int* __restrict__ stridesOut, const int* __restrict__ shapeA,
+    const int* __restrict__ shapeB, int64_t rank) {
 
+        int batch = blockIdx.z;
+        int rowIndex = blockIdx.y * blockDim.y + threadIdx.y; 
+        int colIndex = blockIdx.x * blockDim.x + threadIdx.x;
+
+        int rowsA = shapeA[rank - 2];
+        int colsA = shapeA[rank - 1];
+
+        int rowsB = shapeB[rank - 2];
+        int colsB = shapeB[rank - 1];
+
+        if (rowIndex < rowsA && colIndex < colsB) {
+            auto indexOut = batch * rowsA * colsB + rowIndex * colsB + colIndex;
+
+            auto batchOffsetA = getBatchOffset(stridesOut, stridesA, shapeA, indexOut, rank);
+            auto batchOffsetB = getBatchOffset(stridesOut, stridesB, shapeB, indexOut, rank);
+
+            auto outValue = scalar_t(0);
+            for (int i = 0; i < colsA; i++) {
+                auto indexA = batchOffsetA * rowsA * colsA + rowIndex * colsA + i;
+                auto indexB = batchOffsetB * rowsB * colsB + i * colsB + colIndex;
+
+                outValue += inputA[indexA] * inputB[indexB];
+            }
+            output[indexOut] = outValue;
+        }
 }
 
 at::Tensor torchlab::ops::matmul::unsqueezeToDim(const at::Tensor& t, int targetDim) {
