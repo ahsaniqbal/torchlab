@@ -1,6 +1,7 @@
 #include <vector>
 #include <numeric>
-#include "ops.hpp"
+#include <ATen/Dispatch.h>
+#include "op.hpp"
 
 __device__ int getBatchOffset(const int* __restrict__ stridesOut,
                               const int* __restrict__ stridesIn, 
@@ -17,14 +18,12 @@ __device__ int getBatchOffset(const int* __restrict__ stridesOut,
 }
 
 
-
-
 template<typename scalar_t>
 __global__ void cmatmul_forward_kernel(const scalar_t* __restrict__ inputA,
     const scalar_t* __restrict__ inputB, scalar_t* __restrict__ output,
     const int* __restrict__ stridesA, const int* __restrict__ stridesB,
     const int* __restrict__ stridesOut, const int* __restrict__ shapeA,
-    const int* __restrict__ shapeB, int64_t rank) {
+    const int* __restrict__ shapeB, int rank) {
 
         int batch = blockIdx.z;
         int rowIndex = blockIdx.y * blockDim.y + threadIdx.y; 
@@ -33,7 +32,6 @@ __global__ void cmatmul_forward_kernel(const scalar_t* __restrict__ inputA,
         int rowsA = shapeA[rank - 2];
         int colsA = shapeA[rank - 1];
 
-        int rowsB = shapeB[rank - 2];
         int colsB = shapeB[rank - 1];
 
         if (rowIndex < rowsA && colIndex < colsB) {
@@ -44,8 +42,8 @@ __global__ void cmatmul_forward_kernel(const scalar_t* __restrict__ inputA,
 
             auto outValue = scalar_t(0);
             for (int i = 0; i < colsA; i++) {
-                auto indexA = batchOffsetA * rowsA * colsA + rowIndex * colsA + i;
-                auto indexB = batchOffsetB * rowsB * colsB + i * colsB + colIndex;
+                auto indexA = batchOffsetA + rowIndex * stridesA[rank - 2] + i * stridesA[rank - 1];
+                auto indexB = batchOffsetB + i * stridesB[rank - 2] + colIndex * stridesB[rank - 1];
 
                 outValue += inputA[indexA] * inputB[indexB];
             }
@@ -132,20 +130,23 @@ at::Tensor torchlab::ops::matmul::forward(const at::Tensor& inputA, const at::Te
 
     auto output = at::empty(outputShape, matA.options());
 
-    auto stridesA = at::tensor(matA.strides(), matA.options().dtype(at::kLong));
-    auto stridesB = at::tensor(matB.strides(), matB.options().dtype(at::kLong));
-    auto stridesOut = at::tensor(output.strides(), output.options().dtype(at::kLong));
+    // By default, PyTorch represents strides and shapes using int64.
+    // However, using int64 in CUDA kernels can hurt performance.
+    // Internally, PyTorch decides at kernel launch whether to cast them
+    // down to int32 (for better performance) or keep them as int64,
+    // depending on the tensor sizes.
+    auto stridesA = at::tensor(matA.strides(), matA.options().dtype(c10::kInt));
+    auto stridesB = at::tensor(matB.strides(), matB.options().dtype(c10::kInt));
+    auto stridesOut = at::tensor(output.strides(), output.options().dtype(c10::kInt));
+    auto shapeA = at::tensor(matA.sizes(), matA.options().dtype(c10::kInt));
+    auto shapeB = at::tensor(matB.sizes(), matB.options().dtype(c10::kInt));
 
-    int numThreadsRows = 32;
-    int numThreadsCols = 32;
     //kernel call
     AT_DISPATCH_FLOATING_TYPES(matA.scalar_type(), "cmatmul::forward", [&]{
-        const scalar_t* dataMatA = matA.data_ptr<scalar_t>();
-        const scalar_t* dataMatB = matB.data_ptr<scalar_t>();
+        int numThreadsRows = 32;
+        int numThreadsCols = 32;
 
-        scalar_t* dataOut = output.data_ptr<scalar_t>();
-
-        int64_t batchCount = std::accumulate(outputShape.begin(), outputShape.end() - 2, int64_t(1), std::multiplies<int64_t>());
+        int batchCount = std::accumulate(outputShape.begin(), outputShape.end() - 2, int(1), std::multiplies<int>());
 
         dim3 gridConfig = dim3((outputShape[outputShape.size() - 2] + numThreadsRows - 1) / numThreadsRows,
                                 (outputShape[outputShape.size() - 1] + numThreadsCols - 1) / numThreadsCols,
@@ -153,8 +154,10 @@ at::Tensor torchlab::ops::matmul::forward(const at::Tensor& inputA, const at::Te
         dim3 blockConfig = dim3(numThreadsRows, numThreadsCols, 1);
         
         //kernel_launch_here
-        //cmatmul_forward_kernel<scalar_t><<<gridConfig, blockConfig, 0, stream>>>(dataMatA, dataMatB, dataOut,
-        //    matA.sizes()[matA.dim() - 2], matA.sizes()[matA.dim() - 1], matB.sizes()[matB.dim() - 1], batchCount, stridesOut, stridesA, stridesB, output.dim());
+        cmatmul_forward_kernel<scalar_t><<<gridConfig, blockConfig, 0, stream>>>(
+            matA.data_ptr<scalar_t>(), matB.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+            stridesA.data_ptr<int>(), stridesB.data_ptr<int>(), stridesOut.data_ptr<int>(),
+            shapeA.data_ptr<int>(), shapeB.data_ptr<int>(),  static_cast<int>(output.dim()));
 
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     });

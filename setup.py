@@ -29,6 +29,9 @@ setup(
             sources=[
                 "src/custom_ops/sigmoid/dispatch.cpp",
                 "src/custom_ops/sigmoid/kernels.cu",
+
+                "src/custom_ops/matmul/dispatch.cpp",
+                "src/custom_ops/matmul/kernels.cu",
             ],
             extra_compile_args={
                 "cxx": [f"-D_GLIBCXX_USE_CXX11_ABI={torch._C._GLIBCXX_USE_CXX11_ABI}"]
