@@ -1,7 +1,10 @@
 #include "op.hpp"
 
 // Dispatcher schema: declares operator signatures
-TORCH_LIBRARY(torchlab, m) {
+/*TORCH_LIBRARY(torchlab, m) {
+    m.def("customsigmoid(Tensor input) -> Tensor");
+}*/
+TORCH_LIBRARY_FRAGMENT(torchlab, m) {
     m.def("customsigmoid(Tensor input) -> Tensor");
 }
 

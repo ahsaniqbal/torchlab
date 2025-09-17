@@ -148,11 +148,11 @@ at::Tensor torchlab::ops::matmul::forward(const at::Tensor& inputA, const at::Te
 
         int batchCount = std::accumulate(outputShape.begin(), outputShape.end() - 2, int(1), std::multiplies<int>());
 
-        dim3 gridConfig = dim3((outputShape[outputShape.size() - 2] + numThreadsRows - 1) / numThreadsRows,
-                                (outputShape[outputShape.size() - 1] + numThreadsCols - 1) / numThreadsCols,
-                                batchCount);
+        dim3 gridConfig = dim3((outputShape[outputShape.size() - 1] + numThreadsCols - 1) / numThreadsCols,
+            (outputShape[outputShape.size() - 2] + numThreadsRows - 1) / numThreadsRows,
+            batchCount);
         dim3 blockConfig = dim3(numThreadsRows, numThreadsCols, 1);
-        
+
         //kernel_launch_here
         cmatmul_forward_kernel<scalar_t><<<gridConfig, blockConfig, 0, stream>>>(
             matA.data_ptr<scalar_t>(), matB.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),

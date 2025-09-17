@@ -1,6 +1,10 @@
 #include "op.hpp"
 
-TORCH_LIBRARY(torchlab, m) {
+/*TORCH_LIBRARY(torchlab, m) {
+    m.def("cmatmul(Tensor inputA, Tensor inputB) -> Tensor");
+}*/
+
+TORCH_LIBRARY_FRAGMENT(torchlab, m) {
     m.def("cmatmul(Tensor inputA, Tensor inputB) -> Tensor");
 }
 
