@@ -3,7 +3,7 @@ from torchvision.datasets import FashionMNIST
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 
-class FashionMNISTDataModule(L.LightningDataModule):
+class FashionMNISTDM(L.LightningDataModule):
     def __init__(self, batch_size: int):
         super().__init__()
         self.batch_size = batch_size
